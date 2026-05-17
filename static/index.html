@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LRU Buffer Pool — DBMS Lab</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="layout">
+      <header class="header">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <h1>Page replacement lab</h1>
+            <p class="tagline">
+              LRU · FIFO (FCFS) · Optimal · MongoDB disk layer · persisted runs
+            </p>
+          </div>
+        </div>
+        <p id="server-banner" class="server-banner" role="status">Checking server…</p>
+        <nav class="tabs" role="tablist" aria-label="Main sections">
+          <button type="button" class="tab active" data-tab="simulator" role="tab">Simulator</button>
+          <button type="button" class="tab" data-tab="disk" role="tab">Disk (DB)</button>
+          <button type="button" class="tab" data-tab="history" role="tab">History</button>
+          <button type="button" class="tab" data-tab="database" role="tab">Database</button>
+        </nav>
+      </header>
+
+      <main class="main">
+        <section id="panel-simulator" class="tab-panel active" role="tabpanel">
+          <section class="panel controls">
+            <div class="field-row">
+              <label class="field">
+                <span class="label">Frames</span>
+                <input type="number" id="frames" min="1" max="64" value="3" />
+              </label>
+              <label class="field">
+                <span class="label">Replacement policy</span>
+                <select id="policy">
+                  <option value="lru" selected>LRU</option>
+                  <option value="fifo">FIFO (FCFS)</option>
+                  <option value="optimal">Optimal (Belady)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Mode</span>
+                <select id="mode">
+                  <option value="memory" selected>Memory only</option>
+                  <option value="db_backed">DB-backed (LRU + MongoDB)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="label">Write every Nth ref (0=off)</span>
+                <input type="number" id="write-nth" min="0" max="100" value="5" />
+              </label>
+            </div>
+            <label class="field field-grow">
+              <span class="label">Reference string</span>
+              <input
+                type="text"
+                id="pages"
+                spellcheck="false"
+                value="7,0,1,2,0,3,0,4,2,3,0,3,2,1,2,0,1,7,0,1"
+              />
+            </label>
+            <label class="field checkbox-field">
+              <input type="checkbox" id="persist" checked />
+              <span>Save run to database</span>
+            </label>
+            <div class="actions">
+              <button type="button" id="run" class="btn primary">Run simulation</button>
+              <button type="button" id="compare-all" class="btn ghost">Compare all 3 policies</button>
+              <button type="button" id="preset-belady" class="btn ghost">Belady preset</button>
+              <label class="field inline">
+                <span class="label">Load workload</span>
+                <select id="workload-select">
+                  <option value="">— custom —</option>
+                </select>
+              </label>
+              <span id="status" class="status" role="status"></span>
+            </div>
+          </section>
+
+          <section class="panel summary" id="summary" hidden>
+            <div class="stat">
+              <span class="stat-label">Hit ratio</span>
+              <span class="stat-value" id="stat-hit-ratio">—</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Hits / misses</span>
+              <span class="stat-value" id="stat-hm">—</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Evictions</span>
+              <span class="stat-value" id="stat-evictions">—</span>
+            </div>
+            <div class="stat" id="io-stat" hidden>
+              <span class="stat-label">Disk reads / writes</span>
+              <span class="stat-value" id="stat-io">—</span>
+            </div>
+            <div class="stat stat-wide">
+              <span class="stat-label">Policy · optimal bound · run id</span>
+              <span class="stat-value" id="stat-opt">—</span>
+            </div>
+            <div class="stat stat-wide" id="compare-stat" hidden>
+              <span class="stat-label">Compare (LRU / FIFO / Optimal)</span>
+              <span class="stat-value" id="stat-compare">—</span>
+            </div>
+          </section>
+
+          <section class="panel trace-wrap">
+            <div class="trace-head">
+              <h2>Step trace</h2>
+              <span class="hint" id="frame-order-hint">Frame order: MRU → LRU</span>
+            </div>
+            <div class="table-scroll">
+              <table class="trace">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Ref</th>
+                    <th>Op</th>
+                    <th>Result</th>
+                    <th>Evicted</th>
+                    <th>I/O</th>
+                    <th>Dirty</th>
+                    <th>Frames</th>
+                  </tr>
+                </thead>
+                <tbody id="trace-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="panel-disk" class="tab-panel" role="tabpanel" hidden>
+          <section class="panel">
+            <p class="panel-desc">
+              Pages in MongoDB collection <strong>disk_pages</strong>. Misses read a document; dirty
+              victims are written back on eviction.
+            </p>
+            <div class="actions">
+              <button type="button" id="refresh-disk" class="btn primary">Refresh</button>
+              <button type="button" id="seed-disk" class="btn ghost">Seed pages 0–15</button>
+            </div>
+            <div class="table-scroll">
+              <table class="trace">
+                <thead>
+                  <tr>
+                    <th>Page id</th>
+                    <th>Payload</th>
+                    <th>Version</th>
+                    <th>Updated</th>
+                  </tr>
+                </thead>
+                <tbody id="disk-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="panel-history" class="tab-panel" role="tabpanel" hidden>
+          <section class="panel">
+            <div class="actions">
+              <button type="button" id="refresh-runs" class="btn primary">Refresh runs</button>
+              <button type="button" id="clear-runs" class="btn danger">Clear all history</button>
+            </div>
+            <div class="table-scroll">
+              <table class="trace">
+                <thead>
+                  <tr>
+                    <th>Id</th>
+                    <th>Policy</th>
+                    <th>Mode</th>
+                    <th>Frames</th>
+                    <th>Hit ratio</th>
+                    <th>Disk R/W</th>
+                    <th>When</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="runs-body"></tbody>
+              </table>
+            </div>
+            <div id="run-detail" class="run-detail" hidden></div>
+            <div id="history-trace-wrap" class="trace-wrap history-trace" hidden>
+              <h3 class="section-title">Run trace</h3>
+              <div class="table-scroll">
+                <table class="trace">
+                  <thead>
+                    <tr>
+                      <th>#</th>
+                      <th>Ref</th>
+                      <th>Result</th>
+                      <th>Evicted</th>
+                      <th>Frames</th>
+                    </tr>
+                  </thead>
+                  <tbody id="history-trace-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="panel-database" class="tab-panel" role="tabpanel" hidden>
+          <section class="panel">
+            <div class="actions">
+              <button type="button" id="refresh-db" class="btn primary">Refresh status</button>
+            </div>
+          </section>
+          <section class="panel" id="db-status-panel">
+            <p class="panel-desc">Loading connection info…</p>
+          </section>
+          <section class="panel">
+            <h2 class="section-title">How DB connectivity works</h2>
+            <pre class="arch-diagram">Browser → FastAPI (server.py)
+              → PyMongo (db/mongo_connection.py)
+              → MongoDB database buffer_lab
+
+Collections: disk_pages | workloads | simulation_runs
+
+DB-backed pool: miss → DiskManager.read_page()
+                evict dirty → DiskManager.write_page()</pre>
+          </section>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>MongoDB · set <code>MONGODB_URI</code> and <code>MONGODB_DB</code></span>
+      </footer>
+    </div>
+    <script src="/app.js?v=3.0.4" type="module"></script>
+  </body>
+</html>
